@@ -1,0 +1,8 @@
+---
+description: determining the current task the model is doing
+globs: 
+alwaysApply: false
+---
+
+Current state:
+- Implementing Step 3 and 4 on the implementation plan: building the Hypothesis Generator and Hypothesis Validator.

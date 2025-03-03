@@ -1,0 +1,334 @@
+---
+description: the complete implementation plan and knowing what we'll build next so it can keep it in mind while designing.
+globs: 
+alwaysApply: false
+---
+Below is a comprehensive, step‐by‐step plan outlining what needs to be implemented beyond the current code. This plan details the new modules, their integration points, code flow, logic, and how edge cases will be handled.
+
+---
+
+## 1. Master Planner (Orchestrator)
+
+### Description
+- **What:**  
+  A central controller that manages the overall workflow by registering, triggering, and coordinating the various agents.
+- **Purpose:**  
+  To ensure that data flows in the correct order—from ingestion through exploration, hypothesis generation, validation, synthesis, and finally to user presentation.
+- **Integration:**  
+  - Uses the Agent Framework (AgentMemory, BaseAgent, AgentState).  
+  - Calls the Google Sheets Connector to ingest data.  
+  - Orchestrates downstream agents (Data Explorer, Hypothesis Generator, etc.) based on outcomes.
+
+### Implementation Steps
+1. **Define the Workflow:**  
+   - Specify a sequential or conditional workflow (e.g., if data quality is poor, alert the user instead of proceeding).
+   - Map out the steps:
+     - Retrieve data (using Google Sheets Connector)
+     - Run data profiling (Data Explorer)
+     - Generate hypotheses (Hypothesis Generator)
+     - Validate hypotheses (Hypothesis Validator)
+     - Synthesize insights (Insight Synthesizer)
+     - Send final results (Communication Module)
+
+2. **Register Agents:**  
+   - Instantiate and register each agent with the Master Planner.
+   - Store agent references in a central registry within the Master Planner.
+
+3. **Message Routing & Error Handling:**  
+   - Listen for status messages (using the AgentMemory messaging system).
+   - Implement retry or fallback logic when an agent fails.
+   - Define timeouts and error thresholds.
+
+### Edge Cases & Considerations
+- **Data Ingestion Failure:**  
+  If the Sheets Connector fails (e.g., due to invalid credentials or empty data), the Planner should log the error, notify the user via the Communication Module, and possibly abort the workflow.
+- **Agent Timeout:**  
+  If an agent takes too long (e.g., hypothesis generation using Gemini APIs), the Planner should timeout and either retry or continue with a fallback.
+- **Partial Results:**  
+  Allow the system to progress with partial data if one stage fails, and log warnings for incomplete processing.
+
+---
+
+## 2. Data Explorer - THIS IS THE CURRENT STEP
+
+### Description
+- **What:**  
+  An agent that analyzes raw data to generate profiles and basic statistical summaries.
+- **Purpose:**  
+  To perform data quality checks, detect missing values, outliers, distributions, and summarize overall structure.
+- **Integration:**  
+  - Receives DataFrame objects from the Sheets Connector.
+  - Outputs observations to AgentMemory and passes summaries to the Hypothesis Generator.
+
+### Implementation Steps
+1. **Data Profiling:**  
+   - Compute summary statistics (mean, median, standard deviation) for numeric columns.
+   - Identify missing values and flag columns with high percentages of missing data.
+   - Detect potential outliers using simple threshold methods or IQR-based methods.
+
+2. **Report Generation:**  
+   - Generate a structured report (possibly JSON) that includes:
+     - Column types and distributions.
+     - Any anomalies (e.g., columns with all missing values, inconsistent data types).
+
+3. **Store Findings:**  
+   - Save the profiling output to AgentMemory with clear keys (e.g., “data_profile:{spreadsheet_id}:{sheet_name}”).
+   - Send a message indicating completion to trigger the next agent.
+
+### Edge Cases & Considerations
+- **Empty or Corrupt Data:**  
+  If no data is present or data cannot be parsed, generate a clear error message and halt further processing.
+- **Inconsistent Column Types:**  
+  Provide fallback methods or flag warnings for columns that cannot be inferred confidently.
+
+---
+
+## 3. Hypothesis Generator
+
+### Description
+- **What:**  
+  An agent that formulates potential insights (hypotheses) based on patterns discovered in the exploratory phase.
+- **Purpose:**  
+  To suggest non-obvious relationships or trends in the data that can be further validated.
+- **Integration:**  
+  - Consumes data profiles from the Data Explorer.
+  - Uses Gemini APIs for natural language inference to generate well-crafted hypotheses.
+  - Stores output as instances of the `Hypothesis` data class.
+
+### Implementation Steps
+1. **Construct Prompts for Gemini:**  
+   - Create a prompt template that includes:
+     - Context: Summary of data profile (e.g., “Column A shows high variance…”).
+     - Task: “Generate a hypothesis about the relationship between columns X and Y.”
+     - Guidelines: Specify format and required details (confidence, supporting evidence, etc.).
+   - Include examples in the prompt to demonstrate expected output.
+
+2. **Call Gemini API:**  
+   - Handle API requests, including authentication, error-checking, and rate limits.
+   - Process the output from Gemini and parse it into `Hypothesis` objects.
+
+3. **Store & Route Hypotheses:**  
+   - Save generated hypotheses to AgentMemory.
+   - Send a message to the Master Planner that the hypothesis generation stage is complete.
+
+### Edge Cases & Considerations
+- **Insufficient Data:**  
+  If the data profile lacks clear patterns, the prompt should instruct Gemini to return a “no hypothesis” response or a note explaining insufficient data.
+- **API Failures:**  
+  Implement retries and fallback logic if Gemini API calls fail. Log the error and possibly generate a simplified hypothesis using rule-based logic.
+- **Ambiguous Output:**  
+  Validate Gemini’s output format, and if the output does not conform to the expected JSON schema, request a re-run or flag the result.
+
+---
+
+## 4. Hypothesis Validator
+
+### Description
+- **What:**  
+  An agent that rigorously tests the generated hypotheses using statistical methods.
+- **Purpose:**  
+  To confirm or reject hypotheses with quantitative measures (p-values, confidence intervals).
+- **Integration:**  
+  - Uses both the raw data (or its summaries) and the hypotheses.
+  - Updates each hypothesis object with validation status and metrics.
+  - Communicates results to the Insight Synthesizer.
+
+### Implementation Steps
+1. **Validation Logic:**  
+   - For each hypothesis, determine the appropriate statistical test (e.g., t-test, chi-square, correlation analysis).
+   - Run the tests on the relevant data columns.
+   - Calculate metrics like p-values and confidence levels.
+
+2. **Update Hypothesis Object:**  
+   - Use the `validate` method of the Hypothesis data class to update each hypothesis.
+   - Include detailed error messages for any test that cannot be performed.
+
+3. **Feedback to Master Planner:**  
+   - Store the validated hypotheses back in AgentMemory.
+   - Notify the next stage (Insight Synthesizer) when validation is complete.
+
+### Edge Cases & Considerations
+- **Inapplicable Tests:**  
+  If the data does not meet assumptions for a test (e.g., non-normal distribution), switch to a non-parametric test or flag the hypothesis for manual review.
+- **Low Sample Size:**  
+  Handle cases where insufficient data makes validation unreliable. Mark such hypotheses with a “low confidence” flag.
+- **Statistical Errors:**  
+  Catch exceptions during test calculations and provide fallback or default responses.
+
+---
+
+## 5. Insight Synthesizer
+
+### Description
+- **What:**  
+  An agent that consolidates validated hypotheses into actionable insights.
+- **Purpose:**  
+  To transform quantitative validation results into a narrative that informs decision-making.
+- **Integration:**  
+  - Consumes validated hypotheses from the Hypothesis Validator.
+  - Uses Gemini APIs again for narrative synthesis if needed.
+  - Produces output as `Insight` objects.
+
+### Implementation Steps
+1. **Synthesize Insights:**  
+   - Develop logic to combine related hypotheses and group supporting evidence.
+   - Craft a narrative that summarizes the key findings and suggests next steps.
+   - Optionally, generate a title and short description using a Gemini API call.
+
+2. **Define Output Structure:**  
+   - Ensure the output conforms to the `Insight` data structure (title, description, importance, action items, etc.).
+   - Incorporate tags and timestamps for traceability.
+
+3. **Store and Report Insights:**  
+   - Save synthesized insights in AgentMemory.
+   - Signal the Communication Module to display the final results.
+
+### Edge Cases & Considerations
+- **Contradictory Findings:**  
+  If hypotheses conflict, include a note highlighting the ambiguity and suggest additional data collection.
+- **Low Confidence Insights:**  
+  Mark insights with lower importance if the supporting evidence is weak.
+- **API Issues:**  
+  Similar to previous agents, if Gemini API fails, revert to a rule-based synthesis and log the fallback.
+
+---
+
+## 6. Communication Module
+
+### Description
+- **What:**  
+  The final agent responsible for presenting the results and analysis to the user.
+- **Purpose:**  
+  To provide a user-friendly display of the analysis—snippets of process logs, key insights, and any alerts.
+- **Integration:**  
+  - Receives final insights from the Insight Synthesizer.
+  - Works with the UI to show progress and final reports.
+  - May send notifications or update a dashboard.
+
+### Implementation Steps
+1. **Design Output Format:**  
+   - Define a format for the final report (e.g., structured HTML/JSON or formatted text).
+   - Include key elements:
+     - Summary of data exploration.
+     - List of validated hypotheses.
+     - Synthesized insights with recommended actions.
+
+2. **Implement Message Interface:**  
+   - Use the AgentMemory messaging protocol to post updates.
+   - Allow users to query the current state (e.g., “Show me the current insights”).
+  
+3. **Error & Alert Handling:**  
+   - Clearly display any errors encountered during processing.
+   - Provide actionable suggestions if critical stages (like data ingestion or validation) fail.
+
+### Edge Cases & Considerations
+- **Incomplete Workflows:**  
+  If some agents did not complete, include a section in the final report outlining which parts failed and why.
+- **User Clarity:**  
+  Ensure that technical jargon is minimized and explanations are provided for non-technical users.
+
+---
+
+## 7. User Interface (UI) & Integration
+
+### Description
+- **What:**  
+  A simple web UI that allows users to connect to their Google Drive, trigger analysis, and view real-time progress along with final insights.
+- **Purpose:**  
+  To offer an accessible, visual interface that abstracts the underlying agent complexity.
+- **Integration:**  
+  - UI components interact with serverless endpoints (deployed on Vercel) that in turn trigger the Master Planner and individual agents.
+  - Displays logs, data previews, progress bars, and final insights.
+
+### Implementation Steps
+1. **Authentication & File Selection:**  
+   - Implement a login screen where users connect via Google OAuth.
+   - Provide an interface to list available Google Sheets (using the Sheets Connector).
+   - Allow users to optionally add a description or tags for each file.
+
+2. **Real-Time Analysis Dashboard:**  
+   - Show progress updates from the Master Planner and individual agents (using WebSockets or polling serverless endpoints).
+   - Display snippets of the data exploration (e.g., summary tables, charts) as they become available.
+
+3. **Results Display:**  
+   - Create a section to display final insights with clear headlines, descriptions, and recommended actions.
+   - Provide options for downloading reports or CSV exports.
+
+4. **Deployment Considerations for Vercel:**  
+   - Use Vercel’s free tier for hosting both the static UI and dynamic serverless functions.
+   - Ensure that environment variables (for API keys, credentials, etc.) are securely configured.
+   - Optimize for quick load times and serverless scaling.
+
+### Edge Cases & Considerations
+- **User Errors:**  
+  Handle cases where users do not grant the necessary permissions or select invalid files.
+- **Network Issues:**  
+  Provide fallback messages if the connection to backend services times out.
+- **Security:**  
+  Securely handle OAuth tokens and ensure that sensitive data is not exposed on the client side.
+
+---
+
+## 8. Gemini API Integration & Prompt Design
+
+### Description
+- **What:**  
+  Integration of Gemini APIs to serve as the “brain” behind hypothesis generation, validation, and narrative synthesis.
+- **Purpose:**  
+  To leverage advanced natural language understanding and inference to enhance the quality of the generated hypotheses and insights.
+- **Integration:**  
+  - Each agent (Hypothesis Generator, Insight Synthesizer) will call the Gemini API.
+  - Prompts are passed as part of the API payload, and responses are parsed and integrated into the agent’s logic.
+
+### Implementation Steps
+1. **Develop Prompt Templates:**  
+   - **Content Requirements:**  
+     - **Context:** Provide a brief description of the data (from Data Explorer).  
+     - **Task Objective:** Clearly state what the agent is trying to achieve (e.g., “Generate a hypothesis regarding the correlation between variable A and B”).
+     - **Constraints:** Detail any requirements regarding handling missing data, outliers, or ambiguous patterns.
+     - **Output Format:** Define a clear structure (JSON schema or specific text format) for the expected response.
+   - **Structure:**  
+     - Introduction  
+     - Detailed instructions  
+     - Examples (if applicable)  
+     - Edge-case handling instructions (e.g., “If no clear relationship is found, output a statement indicating insufficient evidence.”)
+
+2. **API Call Logic:**  
+   - Wrap API calls in a dedicated utility that handles authentication, error checking, and retries.
+   - Parse the Gemini API response, ensuring it meets the expected schema.
+   - Log any discrepancies or errors for further debugging.
+
+3. **Error & Fallback Handling:**  
+   - If the Gemini API call fails, implement a fallback mechanism (e.g., a simpler rule-based inference).
+   - Validate the output format; if it deviates from the schema, re-run the call with adjusted prompts or alert the Master Planner.
+
+### Edge Cases & Considerations
+- **Prompt Ambiguity:**  
+  Regularly review and refine prompt templates to ensure clarity and reduce ambiguous output.
+- **API Rate Limits & Failures:**  
+  Include logic for handling rate limits (e.g., exponential backoff) and capturing error codes.
+- **Data Quality Impact:**  
+  If the underlying data is sparse or inconsistent, adjust the prompt to include a cautionary note that the inference may be limited.
+
+---
+
+## Overall Flow Summary
+
+1. **User initiates connection via the UI:**  
+   - Authenticates with Google and selects files (optionally adding descriptions).
+
+2. **Google Sheets Connector retrieves data:**  
+   - Data is stored in shared memory and passed to the Master Planner.
+
+3. **Master Planner orchestrates agents sequentially:**  
+   - **Data Explorer:** Profiles and summarizes the data.
+   - **Hypothesis Generator:** Uses profiles and Gemini API to craft hypotheses.
+   - **Hypothesis Validator:** Applies statistical tests to validate the hypotheses.
+   - **Insight Synthesizer:** Consolidates validated hypotheses into actionable insights.
+   - **Communication Module:** Displays progress and final results on the UI.
+
+4. **User sees real-time updates and final analysis:**  
+   - Progress logs, data snapshots, and final insights are shown on a dashboard.
+
+5. **Deployment on Vercel:**  
+   - The entire backend runs as serverless functions, while the UI is hosted as a static site with dynamic endpoints for real-time communication.
