@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #1a1a2e;
+  --foreground: #d6e0f0;
+  --accent: #e94560;
+}
+
+body {
+  @apply bg-dark-primary text-dark-text min-h-screen;
+  color: var(--foreground);
+  background: var(--background);
+}
+
+.btn {
+  @apply px-4 py-2 rounded-md font-medium transition-colors;
+}
+
+.btn-primary {
+  @apply bg-dark-highlight text-white hover:bg-dark-highlight/90 focus:outline-none focus:ring-2 focus:ring-dark-highlight/50;
+}
+
+.btn-secondary {
+  @apply bg-dark-accent text-white hover:bg-dark-accent/90 focus:outline-none focus:ring-2 focus:ring-dark-accent/50;
+}
+
+.card {
+  @apply bg-dark-secondary rounded-lg p-6 shadow-lg;
+} 

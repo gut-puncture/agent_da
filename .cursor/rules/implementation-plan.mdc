@@ -256,7 +256,7 @@ Below is a comprehensive, step‐by‐step plan outlining what needs to be imple
 
 4. **Deployment Considerations for Vercel:**  
    - Use Vercel’s free tier for hosting both the static UI and dynamic serverless functions.
-   - Ensure that environment variables (for API keys, credentials, etc.) are securely configured.
+   - Ensure that environment variables (for API keys, credentials, etc.) are securely configured. This will be done by setting environment variables on vercel.
    - Optimize for quick load times and serverless scaling.
 
 ### Edge Cases & Considerations
