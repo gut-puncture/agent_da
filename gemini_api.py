@@ -12,6 +12,8 @@ import time
 import requests
 from typing import Dict, Any, Optional, List, Union
 import backoff
+import threading
+from datetime import datetime, timedelta
 
 from prompt_integrator import prompt_integrator
 
@@ -21,6 +23,41 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("GeminiAPI")
+
+class RateLimiter:
+    """
+    Rate limiter for API requests to avoid hitting the rate limits.
+    Implements a token bucket algorithm to manage request rates.
+    """
+    
+    def __init__(self, requests_per_minute: int = 2):
+        """
+        Initialize rate limiter.
+        
+        Args:
+            requests_per_minute: Maximum number of requests allowed per minute
+        """
+        self.requests_per_minute = requests_per_minute
+        self.interval = 60.0 / requests_per_minute  # Time between requests in seconds
+        self.last_request_time = datetime.now() - timedelta(minutes=1)  # Start ready to make requests
+        self.lock = threading.Lock()
+        
+    def wait_if_needed(self):
+        """
+        Wait if necessary to comply with the rate limit.
+        """
+        with self.lock:
+            now = datetime.now()
+            time_since_last_request = (now - self.last_request_time).total_seconds()
+            
+            if time_since_last_request < self.interval:
+                # Need to wait
+                wait_time = self.interval - time_since_last_request
+                logger.info(f"Rate limit: waiting {wait_time:.2f} seconds before next request")
+                time.sleep(wait_time)
+            
+            # Update the last request time
+            self.last_request_time = datetime.now()
 
 class GeminiAPI:
     """
@@ -42,7 +79,7 @@ class GeminiAPI:
             logger.warning("No Gemini API key provided. Set GEMINI_API_KEY environment variable.")
         
         self.base_url = "https://generativelanguage.googleapis.com/v1/models"
-        self.default_model = "gemini-pro"
+        self.default_model = "gemini-2.0-pro-exp-02-05"  # Updated to use the specified model
         
         # Default generation config
         self.default_generation_config = {
@@ -51,6 +88,9 @@ class GeminiAPI:
             "topK": 40,
             "maxOutputTokens": 4096
         }
+        
+        # Create rate limiter for the Gemini API
+        self.rate_limiter = RateLimiter(requests_per_minute=2)
     
     @backoff.on_exception(
         backoff.expo,
@@ -67,7 +107,7 @@ class GeminiAPI:
         
         Args:
             prompt: Text prompt or formatted prompt dictionary
-            model: Model name (defaults to gemini-pro)
+            model: Model name (defaults to gemini-2.0-pro-exp-02-05)
             generation_config: Configuration for generation
             
         Returns:
@@ -79,6 +119,9 @@ class GeminiAPI:
         """
         if not self.api_key:
             raise ValueError("Gemini API key is required")
+        
+        # Wait if needed to respect rate limits
+        self.rate_limiter.wait_if_needed()
         
         model_name = model or self.default_model
         url = f"{self.base_url}/{model_name}:generateContent?key={self.api_key}"
@@ -113,13 +156,20 @@ class GeminiAPI:
             response.raise_for_status()
             
             duration = time.time() - start_time
-            logger.info(f"Gemini API request completed in {duration:.2f}s")
+            logger.info(f"Gemini API request to {model_name} completed in {duration:.2f}s")
             
             return response.json()
             
         except requests.exceptions.HTTPError as e:
             logger.error(f"Gemini API error: {str(e)}")
             logger.error(f"Response: {e.response.text if hasattr(e, 'response') else 'No response'}")
+            
+            # Handle rate limiting errors specifically
+            if hasattr(e, 'response') and e.response.status_code == 429:
+                logger.warning("Rate limit exceeded. Backing off and retrying...")
+                # Force a longer wait before the next request
+                time.sleep(30)
+            
             raise
     
     def extract_text(self, response: Dict[str, Any]) -> str:
@@ -210,13 +260,34 @@ class GeminiAPI:
         Args:
             agent_type: Type of agent (master_planner, data_explorer, etc.)
             context: Context to include in the prompt
-            model: Model name (defaults to gemini-pro)
+            model: Model name (defaults to gemini-2.0-pro-exp-02-05)
             
         Returns:
             API response
         """
         prompt_payload = prompt_integrator.create_gemini_prompt(agent_type, context)
-        return self.generate_content(prompt_payload, model)
+        # Ensure the default model is used if not specified
+        return self.generate_content(prompt_payload, model or self.default_model)
+
+    def batch_generate(self, 
+                      prompts: List[Union[str, Dict[str, Any]]],
+                      model: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Generate content for multiple prompts in a batch, respecting rate limits.
+        
+        Args:
+            prompts: List of prompts to process
+            model: Model name (defaults to gemini-2.0-pro-exp-02-05)
+            
+        Returns:
+            List of API responses
+        """
+        results = []
+        for prompt in prompts:
+            # Generate content for each prompt, respecting rate limits
+            result = self.generate_content(prompt, model)
+            results.append(result)
+        return results
 
 # Create a singleton instance for easy import
 gemini_api = GeminiAPI()

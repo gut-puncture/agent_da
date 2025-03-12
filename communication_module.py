@@ -8,6 +8,7 @@ import requests
 import os
 import re
 from enum import Enum
+import pandas as pd
 
 from agent_framework_core import (
     BaseAgent, 
@@ -17,6 +18,7 @@ from agent_framework_core import (
     Insight
 )
 
+from gemini_api import gemini_api
 from communication_module_prompt import (
     COMMUNICATION_MODULE_PROMPT,
     COMMUNICATION_SYSTEM_PROMPT,
@@ -144,12 +146,7 @@ class CommunicationModule(BaseAgent):
         """Initialize the CommunicationModule agent."""
         super().__init__(agent_id, memory)
         
-        # LLM API configuration
-        self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-        self.gemini_url = os.environ.get(
-            "GEMINI_API_URL", 
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
-        )
+        # We no longer need direct API configuration here as we're using gemini_api module
         
         # Load visualization recommendations
         self.visualization_recommendations = json.loads(VISUALIZATION_RECOMMENDATIONS)
@@ -362,60 +359,102 @@ class CommunicationModule(BaseAgent):
                                      audience: AudienceProfile,
                                      insights: List[Dict[str, Any]]) -> CommunicationOutput:
         """Generate communication using the Gemini API."""
-        # Prepare the prompt
-        audience_info = AUDIENCE_TEMPLATE.format(
-            audience_type=audience.audience_type.value,
-            technical_expertise=f"Level {audience.technical_expertise}/5",
-            domain_knowledge=f"Level {audience.domain_knowledge}/5",
-            primary_questions="\n".join(f"- {q}" for q in audience.primary_questions),
-            key_decisions="\n".join(f"- {d}" for d in audience.key_decisions),
-            time_constraints=audience.time_constraints
-        )
+        logger.info(f"Generating communication for {dataset_name} targeting {audience.audience_type.value} audience")
         
-        insights_data = json.dumps(insights, indent=2)
+        # Simplify insights for the prompt (limit detail to keep within token limits)
+        insight_summaries = [
+            {
+                "title": insight.get("title", "Untitled"),
+                "description": insight.get("description", "")[:300],  # Truncate long descriptions
+                "importance": insight.get("importance", 0.5),
+                "action_items": insight.get("action_items", [])[:3]  # Limit action items
+            }
+            for insight in insights[:10]  # Limit to top 10 insights
+        ]
         
-        prompt = INSIGHT_TO_COMMUNICATION_TEMPLATE.format(
-            audience_information=audience_info,
-            insights_data=insights_data,
-            communication_template=COMMUNICATION_TEMPLATE
-        )
+        # Build the prompt
+        prompt = f"""
+        # Communication Request
+
+        ## Dataset
+        {dataset_name}
+
+        ## Audience Profile
+        - Type: {audience.audience_type.value}
+        - Technical Expertise (1-5): {audience.technical_expertise}
+        - Domain Knowledge (1-5): {audience.domain_knowledge}
+        - Time Constraints: {audience.time_constraints}
+        - Primary Questions: {', '.join(audience.primary_questions)}
+        - Key Decisions: {', '.join(audience.key_decisions)}
+
+        ## Insights to Communicate
+        {json.dumps(insight_summaries, indent=2)}
+
+        Please structure your response with the following sections:
+        - Executive Summary
+        - Key Findings
+        - Detailed Insights
+        - Recommended Actions
+        - Methodology
+        - Technical Details (if appropriate for audience)
+        """
         
-        # Call Gemini API
-        response_text = self._call_gemini_api(prompt)
-        
-        # Parse the response
         try:
-            sections = self._parse_communication_sections(response_text)
-            
-            # Create visualization suggestions
-            visualization_suggestions = (
-                self._generate_visualization_suggestions(insights)
-                if audience.technical_expertise >= 3
-                else []
+            # Call Gemini API using the gemini_api module
+            response = gemini_api.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.3,
+                    "topK": 40,
+                    "topP": 0.95,
+                    "maxOutputTokens": 8192,
+                }
             )
             
-            # Create communication output
-            return CommunicationOutput(
-                id=f"comm_{uuid.uuid4()}",
+            # Extract text from the response
+            response_text = gemini_api.extract_text(response)
+            
+            if not response_text:
+                raise ValueError("Empty response from Gemini API")
+            
+            # Parse the response into structured sections
+            sections = self._parse_communication_sections(response_text)
+            
+            # Create the communication output
+            communication_id = f"comm_{str(uuid.uuid4())[:8]}"
+            
+            # Parse the individual sections into structured formats
+            key_findings = self._parse_key_findings(sections.get("Key Findings", ""))
+            detailed_insights = self._parse_detailed_insights(sections.get("Detailed Insights", ""))
+            actions = self._parse_actions(sections.get("Recommended Actions", ""))
+            technical_details = self._parse_technical_details(sections.get("Technical Details", ""))
+            
+            # Generate visualization suggestions based on insights
+            visualization_suggestions = self._generate_visualization_suggestions(insights)
+            
+            # Create the final output
+            output = CommunicationOutput(
+                id=communication_id,
                 dataset_name=dataset_name,
                 audience_profile=audience,
-                executive_summary=sections.get("executive_summary", ""),
-                key_findings=self._parse_key_findings(sections.get("key_findings", "")),
-                detailed_insights=self._parse_detailed_insights(sections.get("detailed_insights", "")),
-                recommended_actions=self._parse_actions(sections.get("recommended_actions", "")),
-                methodology=sections.get("methodology", ""),
-                technical_details=self._parse_technical_details(sections.get("technical_details", "")),
+                executive_summary=sections.get("Executive Summary", "No summary provided."),
+                key_findings=key_findings,
+                detailed_insights=detailed_insights,
+                recommended_actions=actions,
+                methodology=sections.get("Methodology", "No methodology provided."),
+                technical_details=technical_details,
                 visualization_suggestions=visualization_suggestions
             )
             
+            # Store the output in memory
+            self.memory.store(f"communication_{dataset_name}_{communication_id}", output.to_dict())
+            
+            return output
+            
         except Exception as e:
-            logger.error(f"Error parsing Gemini response: {str(e)}", exc_info=True)
-            # Fall back to rule-based
-            return self._generate_rule_based_communication(
-                dataset_name,
-                audience,
-                insights
-            )
+            logger.error(f"Error generating communication with Gemini: {str(e)}", exc_info=True)
+            # Fallback to rule-based approach if Gemini fails
+            return self._generate_rule_based_communication(dataset_name, audience, insights)
     
     def _adapt_text_to_audience(self, text: str, audience: AudienceProfile) -> str:
         """Adapt text based on audience characteristics."""
@@ -607,49 +646,27 @@ class CommunicationModule(BaseAgent):
     
     def _call_gemini_api(self, prompt: str) -> str:
         """Call the Gemini API with the given prompt."""
-        if not self.gemini_api_key:
-            raise ValueError("Gemini API key not set")
-        
-        url = f"{self.gemini_url}?key={self.gemini_api_key}"
-        
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.3,
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 8192,
-            },
-            "systemInstruction": {"parts": [{"text": COMMUNICATION_SYSTEM_PROMPT}]}
-        }
-        
         try:
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
+            # Use the gemini_api module instead of direct API calls
+            response = gemini_api.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.3,
+                    "topK": 40,
+                    "topP": 0.95,
+                    "maxOutputTokens": 8192,
+                }
+            )
             
-            response_json = response.json()
+            # Extract text from the response
+            text = gemini_api.extract_text(response)
             
-            if "candidates" in response_json and len(response_json["candidates"]) > 0:
-                candidate = response_json["candidates"][0]
-                if "content" in candidate and "parts" in candidate["content"]:
-                    parts = candidate["content"]["parts"]
-                    if len(parts) > 0 and "text" in parts[0]:
-                        return parts[0]["text"]
-            
-            logger.warning(f"Unexpected Gemini API response structure: {response_json}")
-            return str(response_json)
-            
+            if not text:
+                raise ValueError("Empty response from Gemini API")
+                
+            return text
         except Exception as e:
-            logger.error(f"Error calling Gemini API: {str(e)}", exc_info=True)
+            logger.error(f"Error calling Gemini API: {str(e)}")
             raise
     
     def _parse_communication_sections(self, text: str) -> Dict[str, str]:

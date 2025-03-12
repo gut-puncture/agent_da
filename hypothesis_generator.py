@@ -17,6 +17,9 @@ from agent_framework_core import (
     DatasetInfo
 )
 
+# Import the Gemini API client
+from gemini_api import gemini_api
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -128,12 +131,7 @@ class HypothesisGenerator(BaseAgent):
         super().__init__(agent_id, memory)
         self.logger = logging.getLogger(f"HypothesisGenerator_{agent_id}")
         
-        # Gemini API configuration
-        self.api_key = os.environ.get("GEMINI_API_KEY")
-        self.api_url = "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent"
-        
-        if not self.api_key:
-            self.logger.warning("GEMINI_API_KEY not found in environment variables")
+        # Note: We no longer need direct API configuration here as we're using the gemini_api module
     
     def _execute(self, action: str = "generate_hypotheses", **kwargs) -> Any:
         """
@@ -217,7 +215,7 @@ class HypothesisGenerator(BaseAgent):
         
         # Generate additional hypotheses using Gemini if needed
         remaining_slots = max_hypotheses - len(hypotheses)
-        if remaining_slots > 0 and self.api_key:
+        if remaining_slots > 0:
             gemini_hypotheses = self._generate_gemini_hypotheses(
                 data_profile, remaining_slots, min_confidence, relationship_types)
             hypotheses.extend(gemini_hypotheses)
@@ -399,35 +397,41 @@ class HypothesisGenerator(BaseAgent):
                                   min_confidence: float,
                                   relationship_types: List[str]) -> List[Hypothesis]:
         """
-        Generate hypotheses using the Gemini API based on data profiles.
+        Generate hypotheses using the Gemini API.
         
         Args:
-            data_profile: Data profile containing dataset information
+            data_profile: The data profile dictionary
             max_count: Maximum number of hypotheses to generate
             min_confidence: Minimum confidence level for hypotheses
-            relationship_types: Types of relationships to focus on
+            relationship_types: List of relationship types to focus on
             
         Returns:
-            List of AI-generated Hypothesis objects
+            List of generated hypotheses
         """
-        if not self.api_key:
-            self.logger.warning("Gemini API key not available, skipping AI-generated hypotheses")
-            return []
+        self.logger.info("Generating hypotheses using Gemini API")
         
-        # Create a simplified profile for the prompt
+        # Simplify the data profile for use in the prompt
         simplified_profile = self._simplify_profile_for_prompt(data_profile)
         
-        # Construct the prompt for Gemini
-        prompt = self._construct_gemini_prompt(simplified_profile, relationship_types, max_count)
+        # Create the prompt
+        prompt = self._construct_gemini_prompt(
+            simplified_profile, relationship_types, max_count
+        )
         
         try:
-            # Call the Gemini API
-            response = self._call_gemini_api(prompt)
+            # Call the Gemini API using the gemini_api module
+            response = gemini_api.generate_content(prompt)
+            text = gemini_api.extract_text(response)
+            
+            if not text:
+                self.logger.warning("Empty response from Gemini API")
+                return []
             
             # Parse the response into hypotheses
-            generated_hypotheses = self._parse_gemini_response(response, min_confidence)
+            hypotheses = self._parse_gemini_response(text, min_confidence)
+            self.logger.info(f"Generated {len(hypotheses)} hypotheses using Gemini API")
             
-            return generated_hypotheses
+            return hypotheses
         
         except Exception as e:
             self.logger.error(f"Error generating hypotheses with Gemini: {str(e)}")
@@ -581,36 +585,10 @@ class HypothesisGenerator(BaseAgent):
         Returns:
             The response text from the API
         """
-        url = f"{self.api_url}?key={self.api_key}"
-        
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "topP": 0.8,
-                "topK": 40,
-                "maxOutputTokens": 4096
-            }
-        }
-        
+        # Use the gemini_api module instead of direct API calls
         try:
-            response = requests.post(url, headers=headers, json=data)
-            response.raise_for_status()
-            
-            response_data = response.json()
-            text = response_data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            response = gemini_api.generate_content(prompt)
+            text = gemini_api.extract_text(response)
             
             if not text:
                 raise ValueError("Empty response from Gemini API")

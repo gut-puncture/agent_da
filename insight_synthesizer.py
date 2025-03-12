@@ -18,6 +18,9 @@ from agent_framework_core import (
     Hypothesis
 )
 
+# Import the Gemini API module
+import gemini_api
+
 from insight_synthesizer_prompt import (
     INSIGHT_SYNTHESIZER_PROMPT,
     INSIGHT_SYNTHESIS_SYSTEM_PROMPT,
@@ -62,36 +65,32 @@ class InsightSynthesizer(BaseAgent):
     """
     Agent responsible for synthesizing validated hypotheses into actionable insights.
     
-    This agent transforms statistical findings into business-relevant insights by:
-    1. Grouping related hypotheses
-    2. Generating cohesive narratives
-    3. Identifying actionable recommendations
-    4. Prioritizing insights by importance
-    
-    The synthesizer uses both rule-based methods and Gemini API for advanced synthesis.
+    This agent analyzes validated hypotheses, identifies patterns and relationships between
+    them, and synthesizes them into higher-level insights that can drive decisions. It groups
+    related hypotheses, evaluates their collective significance, and produces actionable 
+    recommendations.
     """
     
     def __init__(self, agent_id: str, memory: AgentMemory):
         """
-        Initialize the InsightSynthesizer agent.
+        Initialize the Insight Synthesizer agent.
         
         Args:
             agent_id: Unique identifier for this agent
-            memory: Shared memory instance for storing/retrieving data
+            memory: Shared memory instance for communication with other agents
         """
         super().__init__(agent_id, memory)
         
-        # LLM API configuration (from environment or defaulted)
-        self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-        self.gemini_url = os.environ.get(
-            "GEMINI_API_URL", 
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
-        )
+        # Configure insight generation parameters
+        self.min_hypotheses_per_insight = 2
+        self.max_insights_per_group = 3
+        self.confidence_threshold = 0.7
         
-        # Configure parameters
-        self.min_hypotheses_per_insight = 1
-        self.max_hypotheses_per_insight = 5
-        self.similarity_threshold = 0.5  # For grouping related hypotheses
+        # Configure similarity threshold for grouping hypotheses
+        self.similarity_threshold = 0.6
+        
+        # Configure summarization parameters
+        self.max_insights_for_summary = 5
         
         logger.info(f"InsightSynthesizer initialized with ID: {agent_id}")
     
@@ -351,10 +350,10 @@ class InsightSynthesizer(BaseAgent):
         
         # Filter groups to ensure they don't exceed max hypotheses per insight
         for group in groups:
-            if len(group.hypotheses) > self.max_hypotheses_per_insight:
+            if len(group.hypotheses) > self.max_insights_per_group:
                 # Sort by confidence and keep only the strongest
                 group.hypotheses.sort(key=lambda h: h.get("confidence_level", 0.5), reverse=True)
-                group.hypotheses = group.hypotheses[:self.max_hypotheses_per_insight]
+                group.hypotheses = group.hypotheses[:self.max_insights_per_group]
         
         return groups
     
@@ -439,69 +438,94 @@ class InsightSynthesizer(BaseAgent):
                              hypotheses: List[Dict[str, Any]],
                              hypothesis_groups: List[InsightGroup]) -> List[Dict[str, Any]]:
         """
-        Generate insights using the Gemini API for advanced synthesis.
+        Generate insights using the Gemini API based on validated hypotheses.
+        
+        This approach uses the full power of the Gemini LLM to analyze relationships
+        between hypotheses and synthesize them into meaningful, actionable insights.
         
         Args:
             dataset_name: Name of the dataset
-            hypotheses: All hypotheses (for context)
-            hypothesis_groups: Grouped hypotheses
+            hypotheses: List of validated hypotheses
+            hypothesis_groups: Grouped hypotheses that might be related
             
         Returns:
-            List of generated insights as dictionaries
+            List of generated insights
         """
-        insights = []
-        
-        # Get dataset info for context
-        dataset_info = self.memory.retrieve(f"dataset_info:{dataset_name}")
-        
-        # Process each group to generate an insight
-        for group in hypothesis_groups:
-            if len(group.hypotheses) < self.min_hypotheses_per_insight:
-                continue
-            
-            # Prepare the dataset context
+        try:
+            # Get dataset info if available
+            dataset_info = self.memory.retrieve(f"data_profile_{dataset_name}")
             dataset_context = self._prepare_dataset_context(dataset_info)
             
-            # Prepare the hypotheses for the prompt
-            hypothesis_text = self._format_hypotheses_for_prompt(group.hypotheses)
+            # Format hypotheses for the prompt
+            hypotheses_text = self._format_hypotheses_for_prompt(hypotheses)
             
-            # Construct the full prompt
+            # Create the prompt
             prompt = SYNTHESIS_PROMPT_TEMPLATE.format(
+                dataset_name=dataset_name,
                 dataset_context=dataset_context,
-                validated_hypotheses=hypothesis_text,
-                json_format=INSIGHT_SYNTHESIS_JSON_FORMAT
+                hypotheses=hypotheses_text,
+                output_format=INSIGHT_SYNTHESIS_JSON_FORMAT
             )
             
-            # Call Gemini API
-            response_text = self._call_gemini_api(prompt)
+            # Call Gemini API using the gemini_api module
+            response = gemini_api.generate_content(
+                prompt, 
+                generation_config={
+                    "temperature": 0.3,
+                    "topK": 40,
+                    "topP": 0.95,
+                    "maxOutputTokens": 8192,
+                }
+            )
             
-            # Parse response into insights
-            try:
-                generated_insights = self._parse_gemini_response(response_text)
+            # Extract text from the response
+            response_text = gemini_api.extract_text(response)
+            
+            if not response_text:
+                raise ValueError("Empty response from Gemini API")
+            
+            # Parse the response
+            insights = self._parse_gemini_response(response_text)
+            
+            # Generate UIDs and set source hypotheses
+            for insight in insights:
+                insight["id"] = str(uuid.uuid4())[:8]
+                insight["source_hypotheses"] = []
                 
-                # Add source information to each insight
-                for insight in generated_insights:
-                    # Generate a new UUID if not provided
-                    if "id" not in insight or not insight["id"]:
-                        insight["id"] = f"insight_{uuid.uuid4()}"
-                    
-                    # Set source hypotheses if not provided
-                    if "source_hypotheses" not in insight or not insight["source_hypotheses"]:
-                        insight["source_hypotheses"] = group.hypothesis_ids
-                    
-                    # Add timestamp if not present
-                    if "created_timestamp" not in insight:
-                        insight["created_timestamp"] = time.time()
-                
-                insights.extend(generated_insights)
-                
-            except Exception as e:
-                logger.error(f"Error parsing Gemini response: {str(e)}", exc_info=True)
-                # Fall back to rule-based for this group
-                rule_based = self._generate_rule_based_insights([group])
-                insights.extend(rule_based)
+                # Try to associate with source hypotheses based on content matching
+                for group in hypothesis_groups:
+                    # Check if this insight seems related to this group
+                    if self._is_insight_related_to_group(insight, group):
+                        insight["source_hypotheses"].extend(group.hypothesis_ids)
+            
+            return insights
+            
+        except Exception as e:
+            logger.error(f"Error generating insights with Gemini: {str(e)}")
+            # Fall back to rule-based generation
+            return self._generate_rule_based_insights(hypothesis_groups)
+    
+    def _is_insight_related_to_group(self, insight: Dict[str, Any], group: InsightGroup) -> bool:
+        """
+        Determine if an insight is related to a hypothesis group.
         
-        return insights
+        Args:
+            insight: The insight to check
+            group: The hypothesis group to compare against
+            
+        Returns:
+            True if they appear related, False otherwise
+        """
+        # Check for column overlap
+        insight_cols = []
+        if "description" in insight:
+            # Extract column names from the description
+            for col in group.primary_columns:
+                if col.lower() in insight["description"].lower():
+                    insight_cols.append(col)
+        
+        # If we found matching columns, consider it related
+        return len(insight_cols) > 0
     
     def _prepare_dataset_context(self, dataset_info: Optional[Dict[str, Any]]) -> str:
         """
@@ -583,64 +607,37 @@ class InsightSynthesizer(BaseAgent):
         Call the Gemini API with the given prompt.
         
         Args:
-            prompt: The prompt to send to Gemini
+            prompt: The prompt to send to the Gemini API
             
         Returns:
-            The response text from Gemini
+            The text response from the API
             
         Raises:
-            Exception: If the API call fails
+            ValueError: If the API key is not set or if there's an error in the API call
         """
-        if not self.gemini_api_key:
-            raise ValueError("Gemini API key not set. Set GEMINI_API_KEY environment variable.")
-        
-        url = f"{self.gemini_url}?key={self.gemini_api_key}"
-        
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        # Prepare the request payload
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 8192,
-            },
-            "systemInstruction": {"parts": [{"text": INSIGHT_SYNTHESIS_SYSTEM_PROMPT}]}
-        }
-        
-        # Log that we're making the API call (but not the full prompt for privacy/security)
-        logger.info(f"Calling Gemini API with prompt length: {len(prompt)}")
-        
         try:
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()  # Raise exception for HTTP errors
+            # Call Gemini API using the gemini_api module
+            response = gemini_api.generate_content(
+                prompt, 
+                generation_config={
+                    "temperature": 0.3,
+                    "topK": 40,
+                    "topP": 0.95,
+                    "maxOutputTokens": 8192,
+                }
+            )
             
-            response_json = response.json()
+            # Extract text from the response
+            response_text = gemini_api.extract_text(response)
             
-            # Extract the generated text
-            if "candidates" in response_json and len(response_json["candidates"]) > 0:
-                candidate = response_json["candidates"][0]
-                if "content" in candidate and "parts" in candidate["content"]:
-                    parts = candidate["content"]["parts"]
-                    if len(parts) > 0 and "text" in parts[0]:
-                        return parts[0]["text"]
-            
-            # If we can't extract text using the expected path, return the raw response
-            logger.warning(f"Unexpected Gemini API response structure: {response_json}")
-            return str(response_json)
+            if not response_text:
+                raise ValueError("Empty response from Gemini API")
+                
+            return response_text
             
         except Exception as e:
-            logger.error(f"Error calling Gemini API: {str(e)}", exc_info=True)
-            raise
+            logger.error(f"Error calling Gemini API: {str(e)}")
+            raise ValueError(f"Error calling Gemini API: {str(e)}")
     
     def _parse_gemini_response(self, response_text: str) -> List[Dict[str, Any]]:
         """

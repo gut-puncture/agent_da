@@ -42,6 +42,22 @@ class PromptIntegrator:
         # Initialize cache for any dynamically loaded prompts
         self.prompt_cache = {}
         
+        # Default generation configuration for Gemini models
+        self.gemini_config = {
+            "gemini-2.0-pro-exp-02-05": {
+                "temperature": 0.2,
+                "topP": 0.8,
+                "topK": 40,
+                "maxOutputTokens": 8192  # Increased for the newer model
+            },
+            "default": {
+                "temperature": 0.2,
+                "topP": 0.8,
+                "topK": 40,
+                "maxOutputTokens": 4096
+            }
+        }
+        
         # Check for environment-based prompt overrides
         self._load_environment_prompts()
     
@@ -120,13 +136,15 @@ class PromptIntegrator:
     
     def create_gemini_prompt(self, 
                            agent_type: str, 
-                           context: Dict[str, Any] = None) -> Dict[str, Any]:
+                           context: Dict[str, Any] = None,
+                           model: str = "gemini-2.0-pro-exp-02-05") -> Dict[str, Any]:
         """
         Create a formatted prompt for Gemini API with relevant context.
         
         Args:
             agent_type: The type of agent
             context: Additional context to include in the prompt
+            model: The model to use (defaults to gemini-2.0-pro-exp-02-05)
             
         Returns:
             A dictionary containing the prompt ready for Gemini API
@@ -138,6 +156,12 @@ class PromptIntegrator:
             context_str = json.dumps(context, indent=2)
             prompt = f"{prompt}\n\n## Current Context\n\n```json\n{context_str}\n```\n\n"
         
+        # Get the appropriate generation config for the model
+        generation_config = self.gemini_config.get(model, self.gemini_config["default"])
+        
+        # Log which model and configuration is being used
+        logger.info(f"Creating prompt for model {model} with agent {agent_type}")
+        
         return {
             "contents": [
                 {
@@ -148,12 +172,7 @@ class PromptIntegrator:
                     ]
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "topP": 0.8,
-                "topK": 40,
-                "maxOutputTokens": 4096
-            }
+            "generationConfig": generation_config
         }
     
     def register_with_agent(self, agent):
