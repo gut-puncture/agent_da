@@ -6,3 +6,5 @@ alwaysApply: false
 
 Current state:
 - Implementing Step 8 on the implementation plan: Gemini API Integration.
+
+import gemini_api
