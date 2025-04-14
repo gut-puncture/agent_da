@@ -79,7 +79,7 @@ class GeminiAPI:
             logger.warning("No Gemini API key provided. Set GEMINI_API_KEY environment variable.")
         
         self.base_url = "https://generativelanguage.googleapis.com/v1/models"
-        self.default_model = "gemini-2.5-pro-preview-03-25"  # Updated to use the specified model
+        self.default_model = "gemini-2.0-pro-exp-02-05"  # Updated to use the specified model
         
         # Default generation config
         self.default_generation_config = {
