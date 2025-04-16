@@ -13,8 +13,6 @@ from typing import Dict, Any
 
 from agent_framework_core import AgentMemory, AgentSystem
 from master_planner import MasterPlanner, WorkflowConfig, create_sample_workflow
-from google_sheets_connector import GoogleSheetsConnector, MultipleSheetConnector
-from data_explorer import DataExplorer
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +30,9 @@ def initialize_system() -> Dict[str, Any]:
     """
     logger.info("Initializing agent system...")
     
+    # Delayed imports for connectors to avoid import-time dependency on Google libraries
+    from google_sheets_connector import GoogleSheetsConnector, MultipleSheetConnector
+    from data_explorer import DataExplorer
     # Create shared memory and agent system
     memory = AgentMemory()
     agent_system = AgentSystem()
@@ -67,7 +68,7 @@ def initialize_system() -> Dict[str, Any]:
         "master_planner": master_planner
     }
 
-def run_sample_workflow(master_planner: MasterPlanner) -> Dict[str, Any]:
+def run_sample_workflow(master_planner: MasterPlanner, initial_data: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     Register and run a sample workflow.
     
@@ -88,11 +89,13 @@ def run_sample_workflow(master_planner: MasterPlanner) -> Dict[str, Any]:
     # Execute the workflow
     logger.info(f"Executing workflow with ID: {workflow_id}")
     
-    initial_data = {
-        "spreadsheet_id": "your_actual_spreadsheet_id",
-        "sheet_name": "Sheet1"
-    }
-    
+    # Use provided initial_data or default sample data
+    if initial_data is None:
+        initial_data = {
+            "spreadsheet_id": "your_actual_spreadsheet_id",
+            "sheet_name": "Sheet1"
+        }
+
     return master_planner.execute_workflow(workflow_id=workflow_id, input_data=initial_data)
 
 def main():

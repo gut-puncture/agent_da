@@ -118,4 +118,38 @@ class MyCustomAgent(BaseAgent):
 
 ## License
 
-[MIT License](LICENSE) 
+[MIT License](LICENSE)
+## Deploying Backend to Heroku
+
+To deploy the Python backend as a web service on Heroku:
+
+1. Install the Heroku CLI: https://devcenter.heroku.com/articles/heroku-cli
+2. Log in to Heroku:
+   ```
+   heroku login
+   ```
+3. Create a new Heroku app (or use an existing one):
+   ```
+   heroku create <your-app-name>
+   ```
+4. Set any required config vars (e.g., Google API credentials):
+   ```
+   heroku config:set GOOGLE_API_CREDENTIALS_JSON="$(cat path/to/credentials.json)"
+   ```
+5. Push the code to Heroku:
+   ```
+   git push heroku main
+   ```
+6. Scale the web process:
+   ```
+   heroku ps:scale web=1
+   ```
+7. View logs:
+   ```
+   heroku logs --tail
+   ```
+
+Once deployed, your service will be available at:
+```
+https://<your-app-name>.herokuapp.com/analysis
+```  
